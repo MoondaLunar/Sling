@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sling — a quiet two-player physics game</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #07090f; color: #cdd3e0;
+    font-family: "Georgia", serif;
+    min-height: 100vh; display: flex; flex-direction: column; align-items: center;
+  }
+  h1 { font-size: 1.4rem; font-weight: normal; letter-spacing: .35em; margin: 18px 0 2px; color: #e8ecf5; }
+  .sub { font-size: .8rem; color: #6b7386; letter-spacing: .12em; margin-bottom: 12px; font-style: italic; }
+  #stage-wrap { position: relative; }
+  canvas { background: #07090f; border: 1px solid #1b2233; border-radius: 6px; display: block; touch-action: none; }
+  #hud {
+    position: absolute; top: 10px; left: 12px; right: 12px;
+    display: flex; justify-content: space-between; pointer-events: none;
+    font-size: .85rem; letter-spacing: .1em;
+  }
+  #hud .sc { color: #e8ecf5; }
+  #hud .you { color: #8fb8ff; } #hud .them { color: #ffb08f; }
+  #msg {
+    position: absolute; bottom: 44px; left: 0; right: 0; text-align: center;
+    font-size: .95rem; color: #aeb6c8; font-style: italic; pointer-events: none;
+    text-shadow: 0 1px 4px #000;
+  }
+  #realex {
+    position: absolute; bottom: 10px; left: 0; right: 0; text-align: center;
+    font-size: .72rem; color: #55607a; pointer-events: none; padding: 0 20px;
+  }
+  .panel {
+    margin: 12px auto; max-width: 920px; width: 94%;
+    font-size: .85rem; line-height: 1.5;
+  }
+  button {
+    background: #131a2a; border: 1px solid #2a3450; color: #cdd3e0;
+    padding: 7px 16px; border-radius: 4px; font-family: inherit; font-size: .85rem;
+    letter-spacing: .08em; cursor: pointer; margin: 2px 4px 2px 0;
+  }
+  button:hover { background: #1a2338; border-color: #3d4a70; }
+  button.on { border-color: #8fb8ff; color: #8fb8ff; }
+  textarea {
+    width: 100%; height: 52px; background: #0b0f19; color: #9aa5bd;
+    border: 1px solid #1b2233; border-radius: 4px; font-family: monospace;
+    font-size: .68rem; padding: 6px; resize: vertical;
+  }
+  .row { margin: 6px 0; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .lbl { color: #6b7386; font-size: .78rem; letter-spacing: .1em; }
+  .fxnote { font-size: .72rem; color: #55607a; font-style: italic; }
+  #conn b { color: #9fe0a8; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<h1>S L I N G</h1>
+<div class="sub">a quiet two-player physics game — three captures win</div>
+
+<div id="stage-wrap">
+  <canvas id="cv" width="900" height="560"></canvas>
+  <div id="hud">
+    <span class="you">YOU <span class="sc" id="s0">0</span></span>
+    <span id="turn" class="sc">—</span>
+    <span class="them"><span class="sc" id="s1">0</span> THEM</span>
+  </div>
+  <div id="msg">waiting for a second player</div>
+  <div id="realex"></div>
+</div>
+
+<div class="panel" id="conn">
+  <div class="row">
+    <span class="lbl">CONNECT</span>
+    <button id="btnHost">Host a room</button>
+    <button id="btnJoin">Join a room</button>
+    <span id="connState" class="lbl">not connected</span>
+  </div>
+  <div id="hostFlow" class="hidden">
+    <div class="row"><span class="lbl">1. send this room code to your friend:</span></div>
+    <textarea id="hostOffer" readonly></textarea>
+    <div class="row">
+      <span class="lbl">2. paste their reply:</span>
+      <button id="btnAccept">Connect</button>
+    </div>
+    <textarea id="hostAnswer"></textarea>
+  </div>
+  <div id="joinFlow" class="hidden">
+    <div class="row"><span class="lbl">paste the room code:</span></div>
+    <textarea id="joinOffer"></textarea>
+    <div class="row"><button id="btnAnswer">Generate reply</button></div>
+    <div class="row"><span class="lbl">send this reply back:</span></div>
+    <textarea id="joinAnswer" readonly></textarea>
+  </div>
+  <div class="row" style="margin-top:10px">
+    <span class="lbl">NONSENSE</span>
+    <button class="fx" id="fxLow">Low-Gravity Tuesday</button>
+    <button class="fx" id="fxMoon">The Purple Moon</button>
+    <span class="fxnote">fiction on top of real physics — each one says what's real underneath</span>
+  </div>
+</div>
+
+<script>
+"use strict";
+// ---------- constants: the physics is real ----------
+const W = 900, H = 560, DT = 1 / 60, STEPS = 1400;
+const PLANETS = [
+  { x: 450, y: 210, r: 30, gm: 5.2e6, c: "#2b3350", name: "quiet one" },
+  { x: 300, y: 400, r: 20, gm: 2.4e6, c: "#33405f", name: "the pebble" },
+];
+const PURPLE = { x: 610, y: 390, r: 22, gm: 2.9e6, c: "#4a3560", name: "purple moon" };
+const PADS = [
+  { x: 80,  y: 500, r: 26, owner: 0, c: "#8fb8ff" },
+  { x: 820, y: 500, r: 26, owner: 1, c: "#ffb08f" },
+];
+const LOWG_SCALE = 0.4; // real: gravitational acceleration scales with GM, so this is just GM scaled
+
+// ---------- state ----------
+let fx = { low: false, moon: false };
+let scores = [0, 0], turn = 0, myId = 0;
+let probe = null;            // {x,y,vx,vy,trial,owner}
+let simulating = false;
+let dragging = false, dragFrom = null, dragTo = null;
+let chat = null;             // RTCDataChannel
+let gameSeedTurn = -1;
+const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
+
+function planets() { return fx.moon ? PLANETS.concat([PURPLE]) : PLANETS.slice(); }
+function gscale() { return fx.low ? LOWG_SCALE : 1; }
+
+// ---------- physics: Newtonian gravity, fixed-step semi-implicit Euler ----------
+function accel(x, y, pls) {
+  let ax = 0, ay = 0;
+  for (const p of pls) {
+    const dx = p.x - x, dy = p.y - y;
+    const d2 = dx * dx + dy * dy, d = Math.sqrt(d2);
+    const a = p.gm * gscale() / d2;
+    ax += a * dx / d; ay += a * dy / d;
+  }
+  return [ax, ay];
+}
+// returns "pad0" | "pad1" | "miss" — deterministic given identical inputs on both peers
+function simulate(owner, angle, power) {
+  const pls = planets();
+  const pad = PADS[owner];
+  let x = pad.x, y = pad.y - pad.r - 2;
+  let vx = Math.cos(angle) * power, vy = -Math.sin(angle) * power;
+  for (let i = 0; i < STEPS; i++) {
+    const [ax, ay] = accel(x, y, pls);
+    vx += ax * DT; vy += ay * DT;
+    x += vx * DT;  y += vy * DT;
+    for (const p of pls) {
+      const dx = p.x - x, dy = p.y - y;
+      if (dx * dx + dy * dy < p.r * p.r) return { outcome: "miss", trail: null };
+    }
+    for (const pd of PADS) {
+      const dx = pd.x - x, dy = pd.y - y;
+      if (dx * dx + dy * dy < pd.r * pd.r) return { outcome: "pad" + pd.owner, trail: null };
+    }
+    if (x < -80 || x > W + 80 || y > H + 80) return { outcome: "miss", trail: null };
+  }
+  return { outcome: "miss", trail: null };
+}
+
+// ---------- animated flight (same integrator, drawn step by step) ----------
+let flight = null;
+function animateFlight(owner, angle, power, outcome, done) {
+  const pls = planets();
+  const pad = PADS[owner];
+  let x = pad.x, y = pad.y - pad.r - 2;
+  let vx = Math.cos(angle) * power, vy = -Math.sin(angle) * power;
+  let trail = [];
+  flight = { x, y, trail, owner };
+  const iv = setInterval(() => {
+    for (let s = 0; s < 3; s++) {
+      const [ax, ay] = accel(x, y, pls);
+      vx += ax * DT; vy += ay * DT;
+      x += vx * DT;  y += vy * DT;
+      trail.push([x, y]);
+      let hitPlanet = false;
+      for (const p of pls) {
+        const dx = p.x - x, dy = p.y - y;
+        if (dx * dx + dy * dy < p.r * p.r) hitPlanet = true;
+      }
+      let hitPad = -1;
+      for (let k = 0; k < PADS.length; k++) {
+        const pd = PADS[k], dx = pd.x - x, dy = pd.y - y;
+        if (dx * dx + dy * dy < pd.r * pd.r) hitPad = k;
+      }
+      if (hitPlanet || hitPad >= 0 || x < -80 || x > W + 80 || y > H + 80) {
+        clearInterval(iv);
+        flight = null;
+        done(hitPad >= 0 ? "pad" + hitPad : "miss");
+        return;
+      }
+    }
+  }, 16);
+}
+
+// ---------- game flow ----------
+function launch(owner, angle, power) {
+  if (simulating) return;
+  simulating = true;
+  const outcome = simulate(owner, angle, power); // pre-computed: both peers agree
+  setMsg(owner === myId ? "letting go…" : "they let go…");
+  animateFlight(owner, angle, power, outcome, (res) => {
+    if (res !== "miss") {
+      const scored = +res.slice(3);
+      scores[scored]++;
+      document.getElementById("s" + scored).textContent = scores[scored];
+      setMsg(scored === owner ? "captured." : "slingshot into their pad. that counts.");
+      flashPad(scored);
+    } else {
+      setMsg(owner === myId ? "lost to the dark. your turn comes back." : "lost to the dark.");
+    }
+    if (scores[0] >= 3 || scores[1] >= 3) {
+      setMsg(scores[myId] >= 3 ? "you win. the dark applauds quietly." : "they win. rematch?");
+      turn = -1;
+      updateTurn();
+      simulating = false;
+      return;
+    }
+    turn = 1 - owner;
+    updateTurn();
+    simulating = false;
+  });
+}
+function updateTurn() {
+  const el = document.getElementById("turn");
+  if (turn < 0) { el.textContent = "game over"; return; }
+  el.textContent = (turn === myId ? "your turn" : "their turn");
+}
+function setMsg(t) { document.getElementById("msg").textContent = t; }
+let flash = -1, flashT = 0;
+function flashPad(i) { flash = i; flashT = performance.now(); }
+
+// ---------- rendering ----------
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  // stars
+  ctx.fillStyle = "#151b2c";
+  for (const [sx, sy] of STARS) { ctx.fillRect(sx, sy, 1.5, 1.5); }
+  // planets
+  for (const p of planets()) {
+    const g = ctx.createRadialGradient(p.x - p.r * .4, p.y - p.r * .4, p.r * .1, p.x, p.y, p.r);
+    g.addColorStop(0, "#4a5478"); g.addColorStop(1, p.c);
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.fill();
+    if (p === PURPLE && fx.moon) {
+      ctx.fillStyle = "#9a7fd0";
+      ctx.font = "italic 11px Georgia"; ctx.textAlign = "center";
+      ctx.fillText("purple (it is just a moon)", p.x, p.y + p.r + 14);
+    }
+  }
+  // pads
+  PADS.forEach((pd, i) => {
+    const active = flash === i && performance.now() - flashT < 900;
+    ctx.strokeStyle = pd.c;
+    ctx.lineWidth = active ? 4 : 2;
+    ctx.globalAlpha = active ? 1 : .8;
+    ctx.beginPath(); ctx.arc(pd.x, pd.y, pd.r, 0, 7); ctx.stroke();
+    if (active) {
+      ctx.beginPath(); ctx.arc(pd.x, pd.y, pd.r + 8 + (performance.now() - flashT) / 30, 0, 7);
+      ctx.globalAlpha = .5; ctx.stroke();
+    }
+    ctx.globalAlpha = 1; ctx.lineWidth = 1;
+  });
+  // pads labels
+  ctx.font = "11px Georgia"; ctx.textAlign = "center";
+  ctx.fillStyle = PADS[0].c; ctx.fillText("you", PADS[0].x, PADS[0].y + PADS[0].r + 16);
+  ctx.fillStyle = PADS[1].c; ctx.fillText("them", PADS[1].x, PADS[1].y + PADS[1].r + 16);
+  // trail + probe
+  if (flight) {
+    ctx.strokeStyle = flight.owner === 0 ? "rgba(143,184,255,.5)" : "rgba(255,176,143,.5)";
+    ctx.beginPath();
+    flight.trail.forEach(([tx, ty], i) => i ? ctx.lineTo(tx, ty) : ctx.moveTo(tx, ty));
+    ctx.stroke();
+    ctx.fillStyle = flight.owner === 0 ? "#cfe0ff" : "#ffdccf";
+    ctx.beginPath(); ctx.arc(flight.x, flight.y, 4, 0, 7); ctx.fill();
+  }
+  // aim line while dragging
+  if (dragging && dragFrom && dragTo) {
+    const a = aimAngle(), p = aimPower();
+    ctx.strokeStyle = "#8fb8ff";
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(dragFrom.x, dragFrom.y);
+    ctx.lineTo(dragFrom.x + Math.cos(a) * p * .35, dragFrom.y - Math.sin(a) * p * .35);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  requestAnimationFrame(draw);
+}
+const STARS = Array.from({ length: 130 }, () => [Math.random() * W, Math.random() * H]);
+draw();
+
+// ---------- input ----------
+function aimAngle() {
+  const dx = dragTo.x - dragFrom.x, dy = dragTo.y - dragFrom.y;
+  let a = Math.atan2(-dy, dx);
+  a = Math.max(0.05, Math.min(Math.PI - 0.05, a)); // no launching into the ground
+  return a;
+}
+function aimPower() {
+  const dx = dragTo.x - dragFrom.x, dy = dragTo.y - dragFrom.y;
+  return Math.max(40, Math.min(340, Math.hypot(dx, dy) * 1.4));
+}
+function pos(e) {
+  const r = cv.getBoundingClientRect();
+  const t = e.touches ? e.touches[0] : e;
+  return { x: (t.clientX - r.left) * W / r.width, y: (t.clientY - r.top) * H / r.height };
+}
+function down(e) {
+  if (turn !== myId || simulating || !connected()) return;
+  const p = pos(e);
+  const pd = PADS[myId];
+  if (Math.hypot(p.x - pd.x, p.y - pd.y) > 90) return;
+  dragging = true; dragFrom = { x: pd.x, y: pd.y - pd.r - 2 }; dragTo = p;
+  e.preventDefault();
+}
+function move(e) { if (dragging) { dragTo = pos(e); e.preventDefault(); } }
+function up(e) {
+  if (!dragging) return;
+  dragging = false;
+  const a = aimAngle(), p = aimPower();
+  send({ t: "launch", owner: myId, a, p, fx: { ...fx } });
+  launch(myId, a, p);
+}
+cv.addEventListener("mousedown", down); cv.addEventListener("mousemove", move);
+window.addEventListener("mouseup", up);
+cv.addEventListener("touchstart", down); cv.addEventListener("touchmove", move);
+cv.addEventListener("touchend", up);
+
+// ---------- nonsense toggles (synced with each launch) ----------
+function bindFx(id, key, real) {
+  const b = document.getElementById(id);
+  b.onclick = () => {
+    fx[key] = !fx[key];
+    b.classList.toggle("on", fx[key]);
+    document.getElementById("realex").textContent = fx[key] ? real : "";
+  };
+}
+bindFx("fxLow", "low",
+  "what's real: nothing here is fictional about gravity — 'low gravity' just scales GM down, exactly how the Moon's surface gravity is 1/6 of ours because its GM is.");
+bindFx("fxMoon", "moon",
+  "what's real: a third gravity well changes every trajectory. Three-body problems don't have closed-form solutions — that part is physics, not nonsense. The purple is the nonsense.");
+
+// ---------- WebRTC: two peers, one data channel, no server ----------
+const RTC_CFG = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+let pc = null;
+function connected() { return !!(chat && chat.readyState === "open"); }
+function setConn(t) { document.getElementById("connState").textContent = t; }
+function wire(channel) {
+  chat = channel;
+  channel.onopen = () => {
+    setConn("connected");
+    setMsg("your turn. drag from your pad, let go to launch.");
+    document.getElementById("hostFlow").classList.add("hidden");
+    document.getElementById("joinFlow").classList.add("hidden");
+    updateTurn();
+  };
+  channel.onclose = () => { setConn("disconnected"); setMsg("the line went quiet."); };
+  channel.onmessage = (ev) => {
+    const m = JSON.parse(ev.data);
+    if (m.t === "launch") {
+      fx = { ...m.fx }; syncFxButtons();
+      launch(m.owner, m.a, m.p);
+    } else if (m.t === "hello") {
+      // guest is id 1, host is id 0
+      myId = m.host ? 1 : 0;
+      updateTurn();
+    }
+  };
+}
+function syncFxButtons() {
+  document.getElementById("fxLow").classList.toggle("on", fx.low);
+  document.getElementById("fxMoon").classList.toggle("on", fx.moon);
+}
+function send(o) { if (connected()) chat.send(JSON.stringify(o)); }
+function gather(pc, done) {
+  if (pc.iceGatheringState === "complete") return done();
+  pc.addEventListener("icegatheringstatechange", () => {
+    if (pc.iceGatheringState === "complete") done();
+  });
+}
+const enc = (o) => btoa(JSON.stringify(o)).replace(/=+$/, "");
+const dec = (s) => JSON.parse(atob(s.trim()));
+
+document.getElementById("btnHost").onclick = async () => {
+  pc = new RTCPeerConnection(RTC_CFG);
+  wire(pc.createDataChannel("sling"));
+  await pc.setLocalDescription(await pc.createOffer());
+  gather(pc, () => {
+    document.getElementById("hostOffer").value = enc(pc.localDescription);
+    document.getElementById("hostFlow").classList.remove("hidden");
+    setConn("room code ready — waiting for their reply");
+  });
+};
+document.getElementById("btnAccept").onclick = async () => {
+  try {
+    await pc.setRemoteDescription(dec(document.getElementById("hostAnswer").value));
+    setConn("connecting…");
+  } catch (e) { setConn("bad code — try pasting it again"); }
+};
+document.getElementById("btnJoin").onclick = () => {
+  document.getElementById("joinFlow").classList.remove("hidden");
+};
+document.getElementById("btnAnswer").onclick = async () => {
+  pc = new RTCPeerConnection(RTC_CFG);
+  pc.ondatachannel = (e) => wire(e.channel);
+  try {
+    await pc.setRemoteDescription(dec(document.getElementById("joinOffer").value));
+  } catch (e) { setConn("bad room code"); return; }
+  await pc.setLocalDescription(await pc.createAnswer());
+  gather(pc, () => {
+    document.getElementById("joinAnswer").value = enc(pc.localDescription);
+    setConn("reply ready — send it back");
+  });
+};
+
+// first realistic message before anyone connects
+document.getElementById("realex").textContent =
+  "what's real underneath: every flight here obeys Newton's law of gravitation, integrated at 60 steps a second. Drag farther for more speed, use the planets to bend your shot.";
+</script>
+</body>
+</html>
