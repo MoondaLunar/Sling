@@ -14,7 +14,8 @@
   }
   h1 { font-size: 1.4rem; font-weight: normal; letter-spacing: .35em; margin: 18px 0 2px; color: #e8ecf5; }
   .sub { font-size: .8rem; color: #6b7386; letter-spacing: .12em; margin-bottom: 12px; font-style: italic; }
-  #stage-wrap { position: relative; }
+  #stage-wrap { position: relative; width: min(900px, 96vw); }
+  #stage-wrap canvas { width: 100%; height: auto; }
   canvas { background: #07090f; border: 1px solid #1b2233; border-radius: 6px; display: block; touch-action: none; }
   #hud {
     position: absolute; top: 10px; left: 12px; right: 12px;
@@ -134,7 +135,7 @@ function accel(x, y, pls) {
   let ax = 0, ay = 0;
   for (const p of pls) {
     const dx = p.x - x, dy = p.y - y;
-    const d2 = dx * dx + dy * dy, d = Math.sqrt(d2);
+    const d2 = Math.max(dx * dx + dy * dy, 1), d = Math.sqrt(d2);
     const a = p.gm * gscale() / d2;
     ax += a * dx / d; ay += a * dy / d;
   }
@@ -172,8 +173,10 @@ function animateFlight(owner, angle, power, outcome, done) {
   let vx = Math.cos(angle) * power, vy = -Math.sin(angle) * power;
   let trail = [];
   flight = { x, y, trail, owner };
+  let steps = 0;
   const iv = setInterval(() => {
     for (let s = 0; s < 3; s++) {
+      if (++steps > STEPS) { clearInterval(iv); flight = null; done("miss"); return; }
       const [ax, ay] = accel(x, y, pls);
       vx += ax * DT; vy += ay * DT;
       x += vx * DT;  y += vy * DT;
@@ -191,7 +194,7 @@ function animateFlight(owner, angle, power, outcome, done) {
       if (hitPlanet || hitPad >= 0 || x < -80 || x > W + 80 || y > H + 80) {
         clearInterval(iv);
         flight = null;
-        done(hitPad >= 0 ? "pad" + hitPad : "miss");
+        done(!hitPlanet && hitPad >= 0 ? "pad" + hitPad : "miss");
         return;
       }
     }
@@ -205,10 +208,12 @@ function launch(owner, angle, power) {
   const outcome = simulate(owner, angle, power); // pre-computed: both peers agree
   setMsg(owner === myId ? "letting go…" : "they let go…");
   animateFlight(owner, angle, power, outcome, (res) => {
+    if (res !== outcome.outcome) console.warn("Flight mismatch:", res, outcome.outcome);
+    res = outcome.outcome;
     if (res !== "miss") {
       const scored = +res.slice(3);
       scores[scored]++;
-      document.getElementById("s" + scored).textContent = scores[scored];
+      updateTurn();
       setMsg(scored === owner ? "captured." : "slingshot into their pad. that counts.");
       flashPad(scored);
     } else {
@@ -230,6 +235,8 @@ function updateTurn() {
   const el = document.getElementById("turn");
   if (turn < 0) { el.textContent = "game over"; return; }
   el.textContent = (turn === myId ? "your turn" : "their turn");
+  document.querySelector("#hud .you").innerHTML = "YOU <span class=\"sc\" id=\"s0\">" + scores[myId] + "</span>";
+  document.querySelector("#hud .them").innerHTML = "<span class=\"sc\" id=\"s1\">" + scores[1-myId] + "</span> THEM";
 }
 function setMsg(t) { document.getElementById("msg").textContent = t; }
 let flash = -1, flashT = 0;
@@ -268,8 +275,8 @@ function draw() {
   });
   // pads labels
   ctx.font = "11px Georgia"; ctx.textAlign = "center";
-  ctx.fillStyle = PADS[0].c; ctx.fillText("you", PADS[0].x, PADS[0].y + PADS[0].r + 16);
-  ctx.fillStyle = PADS[1].c; ctx.fillText("them", PADS[1].x, PADS[1].y + PADS[1].r + 16);
+  ctx.fillStyle = PADS[0].c; ctx.fillText(myId === 0 ? "you" : "them", PADS[0].x, PADS[0].y + PADS[0].r + 16);
+  ctx.fillStyle = PADS[1].c; ctx.fillText(myId === 1 ? "you" : "them", PADS[1].x, PADS[1].y + PADS[1].r + 16);
   // trail + probe
   if (flight) {
     ctx.strokeStyle = flight.owner === 0 ? "rgba(143,184,255,.5)" : "rgba(255,176,143,.5)";
@@ -323,6 +330,7 @@ function move(e) { if (dragging) { dragTo = pos(e); e.preventDefault(); } }
 function up(e) {
   if (!dragging) return;
   dragging = false;
+  if (!connected() || simulating || turn !== myId) return;
   const a = aimAngle(), p = aimPower();
   send({ t: "launch", owner: myId, a, p, fx: { ...fx } });
   launch(myId, a, p);
@@ -355,22 +363,20 @@ function wire(channel) {
   chat = channel;
   channel.onopen = () => {
     setConn("connected");
-    setMsg("your turn. drag from your pad, let go to launch.");
+    setMsg(turn === myId ? "your turn. drag from your pad, let go to launch." : "their turn. waiting for a launch.");
     document.getElementById("hostFlow").classList.add("hidden");
     document.getElementById("joinFlow").classList.add("hidden");
     updateTurn();
   };
-  channel.onclose = () => { setConn("disconnected"); setMsg("the line went quiet."); };
+  channel.onclose = () => { if (chat !== channel) return; setConn("disconnected"); setMsg("the line went quiet."); };
   channel.onmessage = (ev) => {
-    const m = JSON.parse(ev.data);
-    if (m.t === "launch") {
-      fx = { ...m.fx }; syncFxButtons();
-      launch(m.owner, m.a, m.p);
-    } else if (m.t === "hello") {
-      // guest is id 1, host is id 0
-      myId = m.host ? 1 : 0;
-      updateTurn();
-    }
+    let m;
+    try { m = JSON.parse(ev.data); } catch { return; }
+    if (!m || m.t !== "launch" || simulating || turn < 0 || m.owner !== turn || m.owner === myId) return;
+    if (!Number.isFinite(m.a) || m.a < 0.05 || m.a > Math.PI - 0.05 || !Number.isFinite(m.p) || m.p < 40 || m.p > 340) return;
+    if (!m.fx || typeof m.fx.low !== "boolean" || typeof m.fx.moon !== "boolean") return;
+    fx = { low: m.fx.low, moon: m.fx.moon }; syncFxButtons();
+    launch(m.owner, m.a, m.p);
   };
 }
 function syncFxButtons() {
@@ -388,6 +394,8 @@ const enc = (o) => btoa(JSON.stringify(o)).replace(/=+$/, "");
 const dec = (s) => JSON.parse(atob(s.trim()));
 
 document.getElementById("btnHost").onclick = async () => {
+  if (pc) pc.close();
+  myId = 0; scores = [0, 0]; turn = 0; updateTurn();
   pc = new RTCPeerConnection(RTC_CFG);
   wire(pc.createDataChannel("sling"));
   await pc.setLocalDescription(await pc.createOffer());
@@ -407,6 +415,8 @@ document.getElementById("btnJoin").onclick = () => {
   document.getElementById("joinFlow").classList.remove("hidden");
 };
 document.getElementById("btnAnswer").onclick = async () => {
+  if (pc) pc.close();
+  myId = 1; scores = [0, 0]; turn = 0; updateTurn();
   pc = new RTCPeerConnection(RTC_CFG);
   pc.ondatachannel = (e) => wire(e.channel);
   try {
