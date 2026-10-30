@@ -124,7 +124,8 @@ let probe = null;            // {x,y,vx,vy,trial,owner}
 let simulating = false;
 let dragging = false, dragFrom = null, dragTo = null;
 let chat = null;             // RTCDataChannel
-let gameSeedTurn = -1;
+let session = 0;
+let flightTimer = null;
 const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
 
 function planets() { return fx.moon ? PLANETS.concat([PURPLE]) : PLANETS.slice(); }
@@ -199,15 +200,37 @@ function animateFlight(owner, angle, power, outcome, done) {
       }
     }
   }, 16);
+  flightTimer = iv;
+}
+
+function resetSession() {
+  session++;
+  if (flightTimer !== null) clearInterval(flightTimer);
+  flightTimer = null;
+  flight = null;
+  simulating = false;
+  dragging = false;
+  dragFrom = dragTo = null;
+  if (chat) { chat.onopen = chat.onclose = chat.onmessage = null; chat.close(); }
+  chat = null;
+  if (pc) pc.close();
+  pc = null;
+  scores = [0, 0];
+  turn = 0;
+  fx = { low: false, moon: false };
+  syncFxButtons();
 }
 
 // ---------- game flow ----------
 function launch(owner, angle, power) {
   if (simulating) return;
   simulating = true;
+  const activeSession = session;
   const outcome = simulate(owner, angle, power); // pre-computed: both peers agree
   setMsg(owner === myId ? "letting go…" : "they let go…");
   animateFlight(owner, angle, power, outcome, (res) => {
+    if (activeSession !== session) return;
+    flightTimer = null;
     if (res !== outcome.outcome) console.warn("Flight mismatch:", res, outcome.outcome);
     res = outcome.outcome;
     if (res !== "miss") {
@@ -226,7 +249,7 @@ function launch(owner, angle, power) {
       simulating = false;
       return;
     }
-    turn = 1 - owner;
+    turn = res === "miss" ? owner : 1 - owner;
     updateTurn();
     simulating = false;
   });
@@ -332,7 +355,7 @@ function up(e) {
   dragging = false;
   if (!connected() || simulating || turn !== myId) return;
   const a = aimAngle(), p = aimPower();
-  send({ t: "launch", owner: myId, a, p, fx: { ...fx } });
+  if (!send({ t: "launch", owner: myId, a, p, fx: { ...fx } })) return;
   launch(myId, a, p);
 }
 cv.addEventListener("mousedown", down); cv.addEventListener("mousemove", move);
@@ -344,6 +367,7 @@ cv.addEventListener("touchend", up);
 function bindFx(id, key, real) {
   const b = document.getElementById(id);
   b.onclick = () => {
+    if (simulating) return; // never change gravity during an active flight
     fx[key] = !fx[key];
     b.classList.toggle("on", fx[key]);
     document.getElementById("realex").textContent = fx[key] ? real : "";
@@ -356,7 +380,19 @@ bindFx("fxMoon", "moon",
 
 // ---------- WebRTC: two peers, one data channel, no server ----------
 const RTC_CFG = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+// STUN-only: restrictive NATs may require a separately configured TURN relay.
 let pc = null;
+function monitorConnection(peer) {
+  peer.onconnectionstatechange = () => {
+    if (pc !== peer) return;
+    if (peer.connectionState === "failed") {
+      setConn("connection failed — try again or use a TURN relay");
+      setMsg("the connection could not cross the network.");
+    } else if (peer.connectionState === "disconnected") {
+      setConn("connection interrupted");
+    }
+  };
+}
 function connected() { return !!(chat && chat.readyState === "open"); }
 function setConn(t) { document.getElementById("connState").textContent = t; }
 function wire(channel) {
@@ -383,7 +419,7 @@ function syncFxButtons() {
   document.getElementById("fxLow").classList.toggle("on", fx.low);
   document.getElementById("fxMoon").classList.toggle("on", fx.moon);
 }
-function send(o) { if (connected()) chat.send(JSON.stringify(o)); }
+function send(o) { if (!connected()) return false; try { chat.send(JSON.stringify(o)); return true; } catch { setConn("send failed"); return false; } }
 function gather(pc, done) {
   if (pc.iceGatheringState === "complete") return done();
   pc.addEventListener("icegatheringstatechange", () => {
@@ -394,9 +430,10 @@ const enc = (o) => btoa(JSON.stringify(o)).replace(/=+$/, "");
 const dec = (s) => JSON.parse(atob(s.trim()));
 
 document.getElementById("btnHost").onclick = async () => {
-  if (pc) pc.close();
+  resetSession();
   myId = 0; scores = [0, 0]; turn = 0; updateTurn();
   pc = new RTCPeerConnection(RTC_CFG);
+  monitorConnection(pc);
   wire(pc.createDataChannel("sling"));
   await pc.setLocalDescription(await pc.createOffer());
   gather(pc, () => {
@@ -415,9 +452,10 @@ document.getElementById("btnJoin").onclick = () => {
   document.getElementById("joinFlow").classList.remove("hidden");
 };
 document.getElementById("btnAnswer").onclick = async () => {
-  if (pc) pc.close();
+  resetSession();
   myId = 1; scores = [0, 0]; turn = 0; updateTurn();
   pc = new RTCPeerConnection(RTC_CFG);
+  monitorConnection(pc);
   pc.ondatachannel = (e) => wire(e.channel);
   try {
     await pc.setRemoteDescription(dec(document.getElementById("joinOffer").value));
