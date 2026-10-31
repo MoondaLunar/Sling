@@ -76,6 +76,7 @@
     <span class="lbl">CONNECT</span>
     <button id="btnHost">Host a room</button>
     <button id="btnJoin">Join a room</button>
+    <button id="btnReset">Reset game</button>
     <span id="connState" class="lbl">not connected</span>
   </div>
   <div id="hostFlow" class="hidden">
@@ -126,6 +127,7 @@ let dragging = false, dragFrom = null, dragTo = null;
 let chat = null;             // RTCDataChannel
 let session = 0;
 let flightTimer = null;
+let connectionAttempt = 0;
 const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
 
 function planets() { return fx.moon ? PLANETS.concat([PURPLE]) : PLANETS.slice(); }
@@ -205,6 +207,9 @@ function animateFlight(owner, angle, power, outcome, done) {
 
 function resetSession() {
   session++;
+  connectionAttempt++;
+  document.getElementById("hostFlow").classList.add("hidden");
+  document.getElementById("joinFlow").classList.add("hidden");
   if (flightTimer !== null) clearInterval(flightTimer);
   flightTimer = null;
   flight = null;
@@ -219,6 +224,9 @@ function resetSession() {
   turn = 0;
   fx = { low: false, moon: false };
   syncFxButtons();
+  updateTurn();
+  setMsg("waiting for a second player");
+  setConn("not connected");
 }
 
 // ---------- game flow ----------
@@ -352,6 +360,10 @@ function down(e) {
 function move(e) { if (dragging) { dragTo = pos(e); e.preventDefault(); } }
 function up(e) {
   if (!dragging) return;
+  if (e.changedTouches && e.changedTouches.length) {
+    const t = e.changedTouches[0], r = cv.getBoundingClientRect();
+    dragTo = { x: (t.clientX-r.left)*W/r.width, y: (t.clientY-r.top)*H/r.height };
+  }
   dragging = false;
   if (!connected() || simulating || turn !== myId) return;
   const a = aimAngle(), p = aimPower();
@@ -362,6 +374,7 @@ cv.addEventListener("mousedown", down); cv.addEventListener("mousemove", move);
 window.addEventListener("mouseup", up);
 cv.addEventListener("touchstart", down); cv.addEventListener("touchmove", move);
 cv.addEventListener("touchend", up);
+cv.addEventListener("touchcancel", () => { dragging = false; dragFrom = dragTo = null; });
 
 // ---------- nonsense toggles (synced with each launch) ----------
 function bindFx(id, key, real) {
@@ -404,7 +417,7 @@ function wire(channel) {
     document.getElementById("joinFlow").classList.add("hidden");
     updateTurn();
   };
-  channel.onclose = () => { if (chat !== channel) return; setConn("disconnected"); setMsg("the line went quiet."); };
+  channel.onclose = () => { if (chat !== channel) return; setConn("disconnected"); setMsg("the line went quiet. Host or join a new room to reconnect."); };
   channel.onmessage = (ev) => {
     let m;
     try { m = JSON.parse(ev.data); } catch { return; }
@@ -427,44 +440,67 @@ function gather(pc, done) {
   });
 }
 const enc = (o) => btoa(JSON.stringify(o)).replace(/=+$/, "");
-const dec = (s) => JSON.parse(atob(s.trim()));
+const dec = (s) => {
+  const value = JSON.parse(atob(s.trim()));
+  if (!value || !["offer", "answer"].includes(value.type) || typeof value.sdp !== "string") throw new Error("Invalid room code");
+  return value;
+};
+document.getElementById("btnReset").onclick = () => resetSession();
 
 document.getElementById("btnHost").onclick = async () => {
   resetSession();
   myId = 0; scores = [0, 0]; turn = 0; updateTurn();
+  const attempt = connectionAttempt;
+  try {
   pc = new RTCPeerConnection(RTC_CFG);
-  monitorConnection(pc);
-  wire(pc.createDataChannel("sling"));
-  await pc.setLocalDescription(await pc.createOffer());
-  gather(pc, () => {
-    document.getElementById("hostOffer").value = enc(pc.localDescription);
+  const peer = pc;
+  monitorConnection(peer);
+  wire(peer.createDataChannel("sling"));
+  await peer.setLocalDescription(await peer.createOffer());
+  gather(peer, () => {
+    if (attempt !== connectionAttempt || pc !== peer) return;
+    document.getElementById("hostOffer").value = enc(peer.localDescription);
     document.getElementById("hostFlow").classList.remove("hidden");
     setConn("room code ready — waiting for their reply");
   });
+  } catch (e) { if (attempt === connectionAttempt) setConn("could not create room: " + e.message); }
 };
 document.getElementById("btnAccept").onclick = async () => {
   try {
-    await pc.setRemoteDescription(dec(document.getElementById("hostAnswer").value));
+    const answer = dec(document.getElementById("hostAnswer").value);
+    if (answer.type !== "answer") throw new Error("Expected a join reply");
+    if (!pc) throw new Error("Host a room first");
+    await pc.setRemoteDescription(answer);
     setConn("connecting…");
   } catch (e) { setConn("bad code — try pasting it again"); }
 };
 document.getElementById("btnJoin").onclick = () => {
+  resetSession();
   document.getElementById("joinFlow").classList.remove("hidden");
 };
 document.getElementById("btnAnswer").onclick = async () => {
+  const offerCode = document.getElementById("joinOffer").value;
   resetSession();
+  document.getElementById("joinFlow").classList.remove("hidden");
+  document.getElementById("joinOffer").value = offerCode;
   myId = 1; scores = [0, 0]; turn = 0; updateTurn();
-  pc = new RTCPeerConnection(RTC_CFG);
-  monitorConnection(pc);
-  pc.ondatachannel = (e) => wire(e.channel);
+  const attempt = connectionAttempt;
   try {
-    await pc.setRemoteDescription(dec(document.getElementById("joinOffer").value));
-  } catch (e) { setConn("bad room code"); return; }
-  await pc.setLocalDescription(await pc.createAnswer());
-  gather(pc, () => {
-    document.getElementById("joinAnswer").value = enc(pc.localDescription);
-    setConn("reply ready — send it back");
-  });
+    const offer = dec(offerCode);
+    if (offer.type !== "offer") throw new Error("Expected a host offer");
+    pc = new RTCPeerConnection(RTC_CFG);
+    const peer = pc;
+    monitorConnection(peer);
+    peer.ondatachannel = (e) => wire(e.channel);
+    await peer.setRemoteDescription(offer);
+    if (attempt !== connectionAttempt) return;
+    await peer.setLocalDescription(await peer.createAnswer());
+    gather(peer, () => {
+      if (attempt !== connectionAttempt || pc !== peer) return;
+      document.getElementById("joinAnswer").value = enc(peer.localDescription);
+      setConn("reply ready — send it back");
+    });
+  } catch (e) { if (attempt === connectionAttempt) setConn("could not join: " + e.message); }
 };
 
 // first realistic message before anyone connects
